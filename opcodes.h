@@ -107,6 +107,7 @@
 #define OP_LDA_ABS_X    0xBD /* I */
 #define OP_LDA_ABS_Y    0xB9 /* I */
 #define OP_LDA_ZP_X     0xB5 /* I */
+#define OP_LDA_ZP_IND   0xB2
 #define OP_LDA_ZP_X_IND 0xA1 /* I */
 #define OP_LDA_ZP_IND_Y 0xB1 /* I */
 
@@ -288,5 +289,26 @@
 #define OP_SMB5         0xD7 /* I */
 #define OP_SMB6         0xE7 /* I */
 #define OP_SMB7         0xF7 /* I */
+
+/****************************
+ * W65C02 undefined opcodes *
+ ****************************/
+#define OP_UNDEF_02     0x02    // 2-byte NOPs
+#define OP_UNDEF_22     0x22
+#define OP_UNDEF_42     0x42
+#define OP_UNDEF_62     0x62
+#define OP_UNDEF_82     0x82
+#define OP_UNDEF_C2     0xC2
+#define OP_UNDEF_E2     0xE2
+#define OP_UNDEF_44     0x44
+#define OP_UNDEF_54     0x54
+#define OP_UNDEF_D4     0xD4
+#define OP_UNDEF_F4     0xF4
+
+#define OP_UNDEF_5C     0x5C    // 3-byte NOPs
+#define OP_UNDEF_DC     0xDC
+#define OP_UNDEF_FC     0xFC
+
+// 1-byte NOPs are handled by the inline increment on the obcode fetch.
 
 #endif // ifndef OPCODES_H

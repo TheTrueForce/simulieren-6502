@@ -12,10 +12,14 @@
 //     to 0xFF. None of these registers are initialised on real hardware.
 //    reset6502() takes a boolean parameter that determines whether or not it
 //     does a faithful reset.
-//  - Decimal mode is probably full of incompatibilites.
-//     Binary addition is done internally, and this is then truncated to two BCD
-//      digits.
+//  - Decimal mode is unreliable, but at least gets it right sometimes.
+//     BCD inputs are assumed, and are converted to binary. Addition is
+//      performed on the binary versions, and the result converted to BCD,
+//      truncating if an overflow occurs. Addition appears to be correct, but
+//      Klaus' test suite complains about decimal sbc, possibly due to the fact
+//      that sbc is implemented as an adc with a complemented input.
 //     Zero, Negative and Overflow function exactly the same way as in binary mode.
+//      For Zero, this is fine. negative BCD numbers are a pain to represent, and the Overflow flag is a signed thing anyway.
 
 #include "simulieren-6502.h"
 #include "opcodes.h"
@@ -35,7 +39,7 @@ uint16_t programCounter;
  *************************/
 bool flagNegative;  // Indicates result negative(bit 7 set).
 bool flagOverflow;  // Indicates two's-complement arithmetic overflow.
-bool flagBRK;       // Indicates that the last interrupt was caused by a BRK instruction.
+bool flagBRK;       // Indicates that the last interrupt was caused by a BRK instruction. (should this really be here?)
 bool flagDecimal;   // Indicates whether decimal mode is set.
 bool flagIRQdisable;// Indicates whether the emulated 6502 responds to IRQs. NMIs are unaffected.
 bool flagZero;      // Indicates result zero.
@@ -111,6 +115,7 @@ void pullStatus() {
     if ((temp & 0x04) != 0) flagIRQdisable = true;
     if ((temp & 0x08) != 0) flagDecimal = true;
     if ((temp & 0x10) != 0) flagBRK = true;
+    // 0x20 - unused bit
     if ((temp & 0x40) != 0) flagOverflow = true;
     if ((temp & 0x80) != 0) flagNegative = true;
 }
@@ -124,7 +129,7 @@ void pushStatus() {
     temp = temp << 1;
     temp++;
     temp = temp << 1;
-    if (flagBRK) temp++;
+    /*if (flagBRK)*/ temp++; // Klaus' test suite seems to imply that BRK is always set.
     temp = temp << 1;
     if (flagDecimal) temp++;
     temp = temp << 1;
@@ -208,9 +213,9 @@ void reset6502(bool faithful) {
 
 void doInterrupt(uint16_t vector) {
     hitWAI = false;
+    pushStatus();
     flagDecimal = false;
     flagIRQdisable = true;
-    pushStatus();
     pushPC();
     programCounter = readShort(vector);
 }
@@ -233,14 +238,10 @@ uint16_t getABSAddr() {
     return ret;
 }
 uint16_t getABS_XAddr() {
-    uint16_t ret = readShort(programCounter) + X;
-    programCounter += 2;
-    return ret;
+    return getABSAddr() + X;
 }
 uint16_t getABS_YAddr() {
-    uint16_t ret = readShort(programCounter) + Y;
-    programCounter += 2;
-    return ret;
+    return getABSAddr() + Y;
 }
 uint16_t getABS_INDAddr() {
     uint16_t addrSrc = getABSAddr();
@@ -254,10 +255,12 @@ uint16_t getZPAddr() {
     return 0x0000 | readByte(programCounter++);
 }
 uint16_t getZP_XAddr() {
-    return getZPAddr() + X;
+    // ZP addressing stays within ZP
+    return (getZPAddr() + X) & 0x00FF;
 }
 uint16_t getZP_YAddr() {
-    return getZPAddr() + Y;
+    // ZP addressing stays within ZP
+    return (getZPAddr() + Y) & 0x00FF;
 }
 uint16_t getZP_INDAddr() {
     uint16_t addrSrc = getZPAddr();
@@ -275,21 +278,32 @@ void adc(uint8_t value) {
     uint16_t intermediateResult = 0; // this assignment is temporary
     uint8_t oldA = A;
     
+    
+    // if we're in decimal mode, convert both addends from BCD to binary
+    if (flagDecimal) {
+        //      low nybble + high nybble, shifted down, and multiplied by 10
+        A = (A & 0x0F) + (((A & 0xF0) >> 4) * 10);
+        value = (value & 0x0F) + (((value & 0xF0) >> 4) * 10);
+        //printf("BCD conversion: %3i + %3i (%02X + %02X)\n", A, value, A, value);
+    }
+    
     // binary mode
     intermediateResult = A + value + (flagCarry ? 1 : 0);
     flagCarry = (intermediateResult > 0xFF) ? true : false;
     A = (uint8_t)intermediateResult;
     
-    // If decimal mode is enabled, 
+    // If decimal mode is enabled, convert result from binary back to BCD and adjust Carry.
     if (flagDecimal) {
-        // decimal mode - correct for BCD output.
-        // massive potential compatibility failure here.
+        //printf("result: %3i (%02X)\n", A, A);
+        // MSD = ((A / 10) % 10) << 4
+        flagCarry = (intermediateResult > 99);
+        A = (intermediateResult % 10) + ((((intermediateResult % 100) - (intermediateResult % 10)) / 10) << 4);
+        //printf("low digit:  %i\n", intermediateResult % 10);
+        //printf("intermediateResult %% 100: %i\n", intermediateResult % 100);
+        //printf("intermediateResult %% 10:  %i\n", intermediateResult % 10);
+        //printf("(intermediateResult %% 100) - (intermediateResult %% 10) / 10: %i\n", ((intermediateResult % 100) - (intermediateResult % 10)) / 10);
         
-        // set least significant digit
-        A = intermediateResult % 10;
-        
-        // set most significant digit
-        A += ((intermediateResult / 10) % 10) << 8;
+        //printf("BCD adjust: %3i (%02X)\n", A, A);
     }
     // Set V if the sign of both inputs is the same, and that sign is different to the sign of the result.
     //  Else, clear it.
@@ -300,62 +314,69 @@ void adc(uint8_t value) {
     
     // unchanged from binary mode.
     flagZero = (A == 0x00);
-    flagNegative = (A & 0x80) != 0;
+    flagNegative = (A & 0x80);
 }
 void sbc(uint8_t value) {
-    // sbc apparently == adc( value XOR $FF).
-    adc(value ^ 0xFF);
+    // sbc apparently == adc( value XOR $FF) == adc(~value).
+    // this does not hold for decimal mode.
+    //if (!flagDecimal) {
+        adc(~value);
+    //} else {
+    // This doesn't work properly.
+    //    adc(0x99 - value);
+    //}
+    
 }
 void cmp(uint8_t value) {
     uint8_t result = A - value;
     flagCarry = (A >= value) ? true : false;
     flagZero = (result == 0x00);
-    flagNegative = (result & 0x80) != 0;
+    flagNegative = (result & 0x80);
 }
 void cpx(uint8_t value) {
     uint8_t result = X - value;
-    flagNegative = (result & 0x80) != 0;
+    flagNegative = (result & 0x80);
     flagZero = result == 0x00;
     flagCarry = X >= value;
 }
 void cpy(uint8_t value) {
     uint8_t result = Y - value;
-    flagNegative = (result & 0x80) != 0;
+    flagNegative = (result & 0x80);
     flagZero = result == 0x00;
     flagCarry = Y >= value;
 }
 void inc(uint16_t address) {
     uint8_t result = readByte(address)+1;
-    flagNegative = (result & 0x80) != 0x00;
+    flagNegative = (result & 0x80);
     flagZero = result == 0;
     writeByte(address, result);
 }
 void dec(uint16_t address) {
     uint8_t result = readByte(address)-1;
-    flagNegative = (result & 0x80) != 0x00;
+    flagNegative = (result & 0x80);
     flagZero = result == 0;
     writeByte(address, result);
 }
 
 void op_and(uint8_t value) {
     A &= value;
-    flagNegative = (A & 0x80) != 0;
+    flagNegative = (A & 0x80);
     flagZero = A == 0;
 }
 void ora(uint8_t value) {
     A |= value;
-    flagNegative = (A & 0x80) != 0;
+    flagNegative = (A & 0x80);
     flagZero = A == 0;
 }
 void eor(uint8_t value) {
     A ^= value;
-    flagNegative = (A & 0x80) != 0;
+    flagNegative = (A & 0x80);
     flagZero = A == 0;
 }
 void op_bit(uint8_t value) {
-    flagZero = (A & readByte(programCounter++)) == 0x00;
-    flagNegative = (A & 0x80) != 0;
-    flagOverflow = (A & 0x40) != 0;     // next to highest bit
+    flagZero = (A & value) == 0x00;
+    flagNegative = (value & 0x80);
+    flagOverflow = (value & 0x40);     // next to highest bit
 }
 void asl(uint16_t address) {
     uint8_t value = readByte(address);
@@ -363,67 +384,67 @@ void asl(uint16_t address) {
     uint8_t ret = (value << 1) & 0xFE;
     // set carry if high bit was set, clear it otherwise.
     // coud do this before shift, but there is no particular benefit.
-    flagCarry = (value & 0x80) != 0;
-    flagNegative = (ret & 0x80) != 0;
+    flagCarry = (value & 0x80);
+    flagNegative = (ret & 0x80);
     flagZero = ret == 0x00;
-    writeByte(ret, address);
+    writeByte(address, ret);
 }
 void lsr(uint16_t address) {
     uint8_t value = readByte(address);
     // shift left by one place, and mask the bottom bit out to ensure it's zero.
     uint8_t ret = (value >> 1) & 0x7F;
     // set carry if low bit was set, clear it otherwise.
-    flagCarry = (value & 0x01) != 0;
+    flagCarry = (value & 0x01);
     // zero is shifted in, so N is always cleared
     flagNegative = false;
     flagZero = ret == 0x00;
-    writeByte(ret, address);
+    writeByte(address, ret);
 }
 void rol(uint16_t address) {
     uint8_t value = readByte(address);
     // shift left by one place, mask the bottom bit out, and add in the carry
     uint8_t ret = ((value << 1) & 0xFE) + (flagCarry?1:0);
     // set carry if high bit was set, clear it otherwise
-    flagCarry = (value & 0x80) != 0;
-    flagNegative = (ret & 0x80) != 0;
+    flagCarry = (value & 0x80);
+    flagNegative = (ret & 0x80);
     flagZero = ret == 0x00;
-    writeByte(ret, address);
+    writeByte(address, ret);
 }
 void ror(uint16_t address) {
     uint8_t value = readByte(address);
     // shift left by one place, mask the bottom bit out, and add in the carry
-    uint8_t ret = ((value >> 1) & 0x7F) + (flagCarry?1:0);
+    uint8_t ret = ((value >> 1) & 0x7F) + (flagCarry?0x80:0x00);
     // set carry if high bit was set, clear it otherwise
-    flagCarry = (value & 0x01) != 0;
-    flagNegative = (ret & 0x80) != 0;
+    flagCarry = (value & 0x01);
+    flagNegative = (ret & 0x80);
     flagZero = ret == 0x00;
-    writeByte(ret, address);
+    writeByte(address, ret);
 }
 void trb(uint16_t address) {
     uint8_t value = readByte(address);
-    flagCarry = (A & value) == 0x00;
+    flagZero = (A & value) == 0x00;
     value = ~A & value;
-    writeByte(value, address);
+    writeByte(address, value);
 }
 void tsb(uint16_t address) {
     uint8_t value = readByte(address);
-    flagCarry = (A & value) == 0x00;
+    flagZero = (A & value) == 0x00;
     value = A | value;
-    writeByte(value, address);
+    writeByte(address, value);
 }
 void rmb(int bit) {
     uint16_t address = getZPAddr();
     
     // read the byte at the memory location, and mask out the bit specified.
     uint8_t data = readByte(address) & ~(0x01 << bit);
-    writeByte(data, address);
+    writeByte(address, data);
 }
 void smb(int bit) {
     uint16_t address = getZPAddr();
     
     // read the byte at the memory location, and mask in the bit specified.
     uint8_t data = readByte(address) | (0x01 << bit);
-    writeByte(data, address);
+    writeByte(address, data);
 }
 
 void bbs(int bit) {
@@ -446,17 +467,17 @@ void bbr(int bit) {
 void lda(uint8_t value) {
     A = value;
     flagZero = (A == 0x00);
-    flagNegative = (A & 0x80) != 0;
+    flagNegative = (A & 0x80);
 }
 void ldx(uint8_t value) {
     X = value;
     flagZero = (X == 0x00);
-    flagNegative = (X & 0x80) != 0;
+    flagNegative = (X & 0x80);
 }
 void ldy(uint8_t value) {
     Y = value;
     flagZero = (Y == 0x00);
-    flagNegative = (Y & 0x80) != 0;
+    flagNegative = (Y & 0x80);
 }
 // Register stores are implemented directly.
 
@@ -480,8 +501,8 @@ void do6502() {
             // BRK is not affected by the I flag.
           //printf("BRK @ PC=$%04X\n", programCounter);
             programCounter++; // skip the signature byte.
-            doInterrupt(IRQ_VEC);
             flagBRK = true;
+            doInterrupt(IRQ_VEC);
           //printf("PC changed by BRK to %04X\n", programCounter);
             break;
         case OP_RTI:    // Ignores the BRK bit in real hardware
@@ -517,18 +538,24 @@ void do6502() {
             break;
         case OP_PLA:
             A = pullByte();
+            flagNegative = (A & 0x80);
+            flagZero = A == 0x00;
             break;
         case OP_PHX:
             pushByte(X);
             break;
         case OP_PLX:
             X = pullByte();
+            flagNegative = (X & 0x80);
+            flagZero = X == 0x00;
             break;
         case OP_PHY:
             pushByte(Y);
             break;
         case OP_PLY:
             Y = pullByte();
+            flagNegative = (Y & 0x80);
+            flagZero = Y == 0x00;
             break;
         case OP_PHP:
             pushStatus();
@@ -564,6 +591,7 @@ void do6502() {
         #include "load-store.h"
         #include "add-subtract.h"
         #include "logic-ops.h"
+        #include "undefined.h"
     }
     
     if (NMIraised) {

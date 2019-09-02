@@ -96,7 +96,7 @@ case OP_EOR_ZP_IND_Y:
  * Test memory bits against accumulator *
  ****************************************/
 case OP_BIT_IMM:
-    // Immediate mode only affects the Z flag, abd bit() does N,V, and Z
+    // Immediate mode only affects the Z flag, and bit() does N,V, and Z
     flagZero = (A & readByte(programCounter++)) == 0x00;
     break;
 case OP_BIT_ABS:
@@ -196,8 +196,8 @@ case OP_ROL_ZP_X:
 case OP_ROR_ACC:
     {
     uint8_t value = A;
-    // shift left by one place, mask the bottom bit out, and add in the carry
-    A = ((value >> 1) & 0x7F) + (flagCarry?1:0);
+    // shift right by one place, mask the bottom bit out, and add in the carry
+    A = ((value >> 1) & 0x7F) + (flagCarry?0x80:0x00);
     // set carry if high bit was set, clear it otherwise
     flagCarry = (value & 0x01) != 0;
     flagNegative = (A & 0x80) != 0;
@@ -216,9 +216,9 @@ case OP_ROR_ABS_X:
 case OP_ROR_ZP_X:
     ror(getZP_XAddr());
     break;
-/*********************
- * Test and Set Bits *
- *********************/
+/***************************
+ * Test and Set/Reset Bits *
+ ***************************/
 case OP_TRB_ZP:
     trb(getZPAddr());
     break;

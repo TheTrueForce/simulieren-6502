@@ -18,6 +18,9 @@
         case OP_LDA_ABS_Y:
             lda(readByte(getABS_YAddr()));
             break;
+        case OP_LDA_ZP_IND:
+            lda(readByte(getZP_INDAddr()));
+            break;
         case OP_LDA_ZP_X:
             lda(readByte(getZP_XAddr()));
             break;
@@ -83,6 +86,7 @@
             break;
         case OP_STX_ZP_Y:
             writeByte(getZP_YAddr(), X);
+            break;
         /**********
          * Load Y *
          **********/
