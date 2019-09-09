@@ -213,10 +213,10 @@ void reset6502(bool faithful) {
 
 void doInterrupt(uint16_t vector) {
     hitWAI = false;
+    pushPC();
     pushStatus();
     flagDecimal = false;
     flagIRQdisable = true;
-    pushPC();
     programCounter = readShort(vector);
 }
 
@@ -506,8 +506,8 @@ void do6502() {
           //printf("PC changed by BRK to %04X\n", programCounter);
             break;
         case OP_RTI:    // Ignores the BRK bit in real hardware
-            pullPC();
             pullStatus();
+            pullPC();
           //printf("PC changed by RTI to %04X\n", programCounter);
             break;
         case OP_JSR:
