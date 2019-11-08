@@ -6,7 +6,7 @@ In the end, I decided to build a 6502 simulator, run it on an Arduino Due(it has
 
 The \/tests directory is no longer used. I have since switched to using Klaus2m5's test suite([here](https://github.com/Klaus2m5/6502_65C02_functional_tests)) to avoid writing my own and possibly getting it wrong. Simulieren-6502 passes nearly all the 6502 tests, and I am working on getting it to pass the 65C02 ones as well.
 The 6502 tests that it fails are:
- - The decimal mode tests($2A and $2B). As it stands now, decimal ADC should work correctly, provided its inputs are valid BCD. On the other hand, decimal SBC is completely broken.
+ - The decimal mode ADC/SBC test($2A). As it stands now, ADC and SBC should function correctly in decimal mode.
 
 The 65C02 tests that it fails are:
  - TRB/TSB zp/abs($10)

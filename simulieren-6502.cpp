@@ -24,7 +24,7 @@
 #include "simulieren-6502.h"
 #include "opcodes.h"
 
-//#include <stdio.h>
+#include <stdio.h>
 
 /*************
  * Registers *
@@ -39,7 +39,7 @@ uint16_t programCounter;
  *************************/
 bool flagNegative;  // Indicates result negative(bit 7 set).
 bool flagOverflow;  // Indicates two's-complement arithmetic overflow.
-bool flagBRK;       // Indicates that the last interrupt was caused by a BRK instruction. (should this really be here?)
+bool flagBRK;       // Indicates that the last interrupt was caused by a BRK instruction. (this isn't actually a bit in the hardware)
 bool flagDecimal;   // Indicates whether decimal mode is set.
 bool flagIRQdisable;// Indicates whether the emulated 6502 responds to IRQs. NMIs are unaffected.
 bool flagZero;      // Indicates result zero.
@@ -99,6 +99,15 @@ void pushPC() {
     pushByte(programCounter & 0x00FF);
 }
 
+#define MASK_FLAG_NEGATIVE  0x80
+#define MASK_FLAG_OVERFLOW  0x40
+#define MASK_FLAG_UNUSED    0x20
+#define MASK_FLAG_BREAK     0x10
+#define MASK_FLAG_DECIMAL   0x08
+#define MASK_FLAG_INTERRUPT 0x04
+#define MASK_FLAG_ZERO      0x02
+#define MASK_FLAG_CARRY     0x01
+
 // status register stacking and unstacking
 void pullStatus() {
     flagCarry = false;
@@ -122,22 +131,16 @@ void pullStatus() {
 void pushStatus() {
     uint8_t temp = 0;
     
-    if (flagNegative) temp++;
-    temp = temp << 1;
-    if (flagOverflow) temp++;
+    if (flagNegative) temp += MASK_FLAG_NEGATIVE;
+    if (flagOverflow) temp += MASK_FLAG_OVERFLOW;
     // insert a one in the unused spot.
-    temp = temp << 1;
-    temp++;
-    temp = temp << 1;
-    /*if (flagBRK)*/ temp++; // Klaus' test suite seems to imply that BRK is always set.
-    temp = temp << 1;
-    if (flagDecimal) temp++;
-    temp = temp << 1;
-    if (flagIRQdisable) temp++;
-    temp = temp << 1;
-    if (flagZero) temp++;
-    temp = temp << 1;
-    if (flagCarry) temp++;
+    temp += MASK_FLAG_UNUSED;
+    ///*if (flagBRK)*/ temp++; // Klaus' test suite(and everything else I've seen) seems to imply that BRK is always set.
+    temp += MASK_FLAG_BREAK;
+    if (flagDecimal) temp += MASK_FLAG_DECIMAL;
+    if (flagIRQdisable) temp += MASK_FLAG_INTERRUPT;
+    if (flagZero) temp += MASK_FLAG_ZERO;
+    if (flagCarry) temp += MASK_FLAG_CARRY;
     
     pushByte(temp);
 }
@@ -278,33 +281,36 @@ void adc(uint8_t value) {
     uint16_t intermediateResult = 0; // this assignment is temporary
     uint8_t oldA = A;
     
-    
-    // if we're in decimal mode, convert both addends from BCD to binary
-    if (flagDecimal) {
-        //      low nybble + high nybble, shifted down, and multiplied by 10
-        A = (A & 0x0F) + (((A & 0xF0) >> 4) * 10);
-        value = (value & 0x0F) + (((value & 0xF0) >> 4) * 10);
-        //printf("BCD conversion: %3i + %3i (%02X + %02X)\n", A, value, A, value);
-    }
-    
-    // binary mode
-    intermediateResult = A + value + (flagCarry ? 1 : 0);
-    flagCarry = (intermediateResult > 0xFF) ? true : false;
-    A = (uint8_t)intermediateResult;
-    
-    // If decimal mode is enabled, convert result from binary back to BCD and adjust Carry.
-    if (flagDecimal) {
-        //printf("result: %3i (%02X)\n", A, A);
-        // MSD = ((A / 10) % 10) << 4
-        flagCarry = (intermediateResult > 99);
-        A = (intermediateResult % 10) + ((((intermediateResult % 100) - (intermediateResult % 10)) / 10) << 4);
-        //printf("low digit:  %i\n", intermediateResult % 10);
-        //printf("intermediateResult %% 100: %i\n", intermediateResult % 100);
-        //printf("intermediateResult %% 10:  %i\n", intermediateResult % 10);
-        //printf("(intermediateResult %% 100) - (intermediateResult %% 10) / 10: %i\n", ((intermediateResult % 100) - (intermediateResult % 10)) / 10);
+    if (!flagDecimal) {
+        // binary mode
+        intermediateResult = A + value + (flagCarry ? 1 : 0);
+        flagCarry = (intermediateResult > 0xFF) ? true : false;
+        A = (uint8_t)intermediateResult;
+    } else {
+            //printf("decimal mode adc:\n");
+        //decimal mode
+        // add low nybble
+        intermediateResult = (A & 0x0F) + (value & 0x0F) + (flagCarry ? 1 : 0);
+            //printf("low nybble = %02X\n", intermediateResult);
+        // correct for BCD
+        if (intermediateResult > 0x09) {
+            intermediateResult += 0x06;
+        }
+            //printf("corrected = %02X\n", intermediateResult);
         
-        //printf("BCD adjust: %3i (%02X)\n", A, A);
+        // add high nybble
+        intermediateResult = (A & 0xF0) + (value & 0xF0) + intermediateResult;
+            //printf("high nybble = %02X\n", intermediateResult & 0xFF0);
+        // correct for BCD
+        if ((intermediateResult & 0xFF0) > 0x90) {
+            intermediateResult += 0x60;
+            flagCarry = true;
+        }
+            //printf("corrected = %02X\n", intermediateResult & 0xFF0);
+        A = intermediateResult;
+            //printf("decimal mode adc: %i + %02X + %02X = %02X\n", flagCarry, oldA, value, A);
     }
+    
     // Set V if the sign of both inputs is the same, and that sign is different to the sign of the result.
     //  Else, clear it.
     // I'm not sure if I really need to use a cast in this.
@@ -317,14 +323,41 @@ void adc(uint8_t value) {
     flagNegative = (A & 0x80);
 }
 void sbc(uint8_t value) {
-    // sbc apparently == adc( value XOR $FF) == adc(~value).
+    // sbc == adc( value XOR $FF) == adc(~value).
     // this does not hold for decimal mode.
-    //if (!flagDecimal) {
+    if (!flagDecimal) {
         adc(~value);
-    //} else {
-    // This doesn't work properly.
-    //    adc(0x99 - value);
-    //}
+    } else {
+        
+            //printf("decimal sbc: %02X - %02X. C = %i\n", A, value, flagCarry);
+        // I do not understand this properly...
+        uint16_t intermediateResult = 0;
+        uint8_t oldA = A;
+        // subtract low nybble
+        intermediateResult = (A & 0x0F) - (value & 0x0F) - (!flagCarry ? 1 : 0);
+            //printf("low nybble: %04X\n", intermediateResult);
+        // correct for BCD
+        if (intermediateResult > 0x09) {
+            intermediateResult -= 0x06;
+        }
+            //printf("corrected: %04X\n", intermediateResult);
+        // subtract high nybble
+        intermediateResult = (A & 0xF0) - (value & 0xF0) + intermediateResult;// - (!flagCarry ? 1 : 0);
+            //printf("high nybble: %04X\n", intermediateResult);
+        // correct for BCD
+        if ((intermediateResult & 0xF0) > 0x90) {
+            intermediateResult -= 0x60;
+        }
+        flagCarry = (intermediateResult < 0x8000);
+            //printf("corrected: %04X\n", intermediateResult);
+        A = intermediateResult;
+            //printf("final: %02X, C = %s\n", A, (flagCarry ? "true" : "false"));
+        
+        flagOverflow = (value^(uint8_t)intermediateResult)&(oldA^(uint8_t)intermediateResult)&0x80;
+        flagZero = (A == 0x00);
+        flagNegative = (A & 0x80);
+    }
+    
     
 }
 void cmp(uint8_t value) {
